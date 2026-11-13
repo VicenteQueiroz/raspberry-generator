@@ -273,6 +273,24 @@ def add_blade(mb, origin, X, Z, length, half_w, nv, zfun, mats, thickness=0.0003
     mb.add((P - Nrm * thickness * 0.5).reshape(-1, 3), uv, q[:, ::-1], mats[1])
 
 
+def add_spikes(mb, base, d, ref, length, radius, mat=0):
+    """Many small 4-sided cones (prickles, stamens). base/d/ref: (n, 3); length/radius: (n,)."""
+    n = len(base)
+    L = np.asarray(length, float)[:, None]
+    rb = np.asarray(radius, float)[:, None]
+    e1 = normalize(np.cross(d, ref))
+    e2 = np.cross(d, e1)
+    k = np.arange(4) * np.pi / 2
+    ring = base[:, None, :] + rb[:, None] * (np.cos(k)[None, :, None] * e1[:, None] +
+                                              np.sin(k)[None, :, None] * e2[:, None])
+    tip = base + d * L
+    verts = np.concatenate([ring, tip[:, None]], 1).reshape(-1, 3)
+    f = np.array([[0, 1, 4], [1, 2, 4], [2, 3, 4], [3, 0, 4]])
+    faces = (f[None] + 5 * np.arange(n)[:, None, None]).reshape(-1, 3)
+    faces = orient_outward(verts, faces, np.repeat(base - d * rb, 4, axis=0))
+    mb.add(verts, np.full((len(verts), 2), 0.5), faces, mat)
+
+
 def sphere_template(seg, rings):
     phi = np.linspace(0, np.pi, rings + 1)[1:-1]
     th = np.linspace(0, 2 * np.pi, seg, endpoint=False)
@@ -475,7 +493,7 @@ def build_materials():
         'calyx': [make_material('sepal', color=(92, 118, 52), roughness=0.85),
                   make_material('sepal_dry', color=(108, 96, 52), roughness=0.9)],
         'flowers': [make_material('petal', color=(242, 240, 228), roughness=0.6),
-                    make_material('flower_center', color=(196, 200, 110), roughness=0.7),
+                    make_material('flower_center', color=(150, 170, 80), roughness=0.7),
                     make_material('stamen', color=(232, 214, 150), roughness=0.7)],
     }
 
@@ -503,20 +521,8 @@ class Plant:
         radial = np.cos(psi)[:, None] * N[idx] + np.sin(psi)[:, None] * B[idx]
         base = pts[idx] + radial * radii[idx, None] * 0.9
         d = normalize(radial - 0.45 * T[idx])
-        L = rng.uniform(0.0018, 0.0035, n)[:, None]
-        rb = rng.uniform(0.0004, 0.0007, n)[:, None]
-        e1 = normalize(np.cross(d, T[idx]))
-        e2 = np.cross(d, e1)
-        k = np.arange(4) * np.pi / 2
-        ring = base[:, None, :] + rb[:, None] * (np.cos(k)[None, :, None] * e1[:, None] +
-                                                  np.sin(k)[None, :, None] * e2[:, None])
-        tip = base + d * L
-        verts = np.concatenate([ring, tip[:, None]], 1).reshape(-1, 3)
-        f = np.array([[0, 1, 4], [1, 2, 4], [2, 3, 4], [3, 0, 4]])
-        faces = (f[None] + 5 * np.arange(n)[:, None, None]).reshape(-1, 3)
-        centers = np.repeat(base - d * rb, 4, axis=0)
-        faces = orient_outward(verts, faces, centers)
-        self.parts['canes'].add(verts, np.full((len(verts), 2), 0.5), faces, mat)
+        add_spikes(self.parts['canes'], base, d, T[idx], rng.uniform(0.0018, 0.0035, n),
+                   rng.uniform(0.0004, 0.0007, n), mat)
 
     def cane(self, base, length, azim, lean, arch, r0, r1, floricane):
         ds = 0.02
@@ -843,10 +849,14 @@ class Plant:
             faces.append(np.stack([k * cs + j, (k + 1) * cs + jn, (k + 1) * cs + j], 1))
         faces = orient_outward(ring, np.vstack(faces), np.zeros(3))
         self.parts['flowers'].add(attach + ring @ R, np.full((len(ring), 2), 0.5), faces, 1)
-        # stamen ring
-        t = np.linspace(0, 2 * np.pi, 16)
-        loop = attach + axis * 0.0016 + 0.0036 * (np.outer(np.cos(t), ex) + np.outer(np.sin(t), ey))
-        add_tube(self.parts['flowers'], loop, 0.0008, 5, mat=2, cap=False)
+        # stamens: a ring of thin filaments splaying out around the pistils
+        ns = 36
+        t = rng.uniform(0, 2 * np.pi) + np.arange(ns) * 2 * np.pi / ns
+        rad = np.outer(np.cos(t), ex) + np.outer(np.sin(t), ey)
+        base = attach + axis * 0.0012 + rad * 0.0026
+        d = normalize(rad * rng.uniform(0.6, 1.0, (ns, 1)) + axis * rng.uniform(0.5, 1.0, (ns, 1)))
+        add_spikes(self.parts['flowers'], base, d, np.tile(axis, (ns, 1)),
+                   rng.uniform(0.0025, 0.0038, ns), np.full(ns, 0.00022), 2)
         self.markers.append({
             'marker_type': 'FLOWER',
             'translation': (attach + axis * 0.003).tolist(),
