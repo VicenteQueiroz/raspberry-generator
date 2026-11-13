@@ -1,74 +1,135 @@
-# fields-ignition 
-### *random crop field generator for Ignition Gazebo*
+# raspberry-generator
+### procedural high-fidelity raspberry fields for Gazebo Harmonic (ROS 2 Jazzy)
 
-![](images/demo.gif)
+A random raspberry field generator for agricultural robotics simulation. The
+ROS 2 package is called `raspberry_field`. Each plant is generated from scratch
+by a Blender script. There is no hand-made `.blend`
+file: geometry, UVs, textures and materials are all code, and the same seed
+always gives the same plant.
 
-:construction: work in progress
+What a plant contains:
+- **Crown of canes:** 4–7 brown, woody **floricanes** that carry fruit, plus
+  2–5 green, leafy **primocanes**. Canes lean along the row like a hedgerow and
+  carry prickles.
+- **Fruiting laterals** on the upper ⅔ of the floricanes. Each lateral has
+  trifoliate leaves and a fruit cyme at its tip, and the terminal fruit ripens
+  first.
+- **Compound leaves** with 3 or 5 leaflets. The leaflets have doubly serrate
+  margins, a midrib fold and curl, a veined normal-mapped upper side and a pale
+  underside.
+- **Aggregate fruit.** Each fruit is made of 75–115 individual drupelets packed
+  in a golden-angle spiral on a conical receptacle. It has a 5-sepal calyx that
+  reflexes as the fruit ripens.
+- **Ripeness stages:** flower / bud → green → white → pink → ripe → overripe.
+  Colour comes from a fruit atlas, and the drupelets near the calyx lag behind
+  the rest of the fruit.
 
- - [What's this?](#whats-this)
- - [Notes](#notes)
- - [Run in a catkin workspace](#run-in-a-catkin-workspace)
- - [Run with Docker](#run-with-docker)
+## Repository layout
 
-## What's this?
-I was wondering how complicated would it be to generate random test environments for agricultural robots. Turned out with great tools like the Blender python API, and Ignition Gazebo it can be a fun and straightforward process :tada:
+```
+blender/raspberry_gen.py     Blender script: generates one plant model (meshes, textures, SDF, markers)
+scripts/generate_field.py    builds a whole field world (runs Blender in parallel, writes world SDF + markers)
+scripts/ground_truth.py      ROS 2 node: publishes markers.json as an RViz MarkerArray
+launch/field.launch.py       starts Gazebo Harmonic with a generated world
+```
 
-This repo contains:
- - [Blender script](fields_ignition/blender/tomato_gen.py) that generates individual tomato crops
- - [Jupyter notebook](fields_ignition/scripts/tomato_gen.ipynb) for building the SDF models and the world description
- - [ROS node](fields_ignition/scripts/ground_truth.py) that visualizes the ground truth data in RViz
- - [Dockerfile](Dockerfile) for running the simulations
- - [Example worlds](fields_ignition/generated_examples) generated with this tool
+## Outputs
+
+```
+<world_dir>/
+  raspberry_field.sdf        world: sun, soil, mulch strips, trellis posts + wires, plants
+  markers.json               world-frame ground truth (PLANT / FRUIT / FLOWER)
+  raspberry_N/
+    model.sdf, model.config
+    meshes/<part>.glb        canes, leaves, calyx, flowers, fruit_<stage>
+    materials/textures/*.png
+    markers.json             plant-frame ground truth
+```
+
+Each part is its own `<visual>` with a `gz::sim::systems::Label` plugin, so a
+Gazebo **segmentation camera** gives per-class masks straight away:
+
+| label | part | label | part |
+|---|---|---|---|
+| 10 | canes, laterals, petioles, pedicels | 21 | fruit_green |
+| 11 | leaves | 22 | fruit_white |
+| 12 | calyx (sepals) | 23 | fruit_pink |
+| 20 | flowers | 24 | fruit_ripe |
+| | | 25 | fruit_overripe |
+
+Each fruit marker records: `translation` (fruit centre), `attach_point`
+(pedicel junction, useful for picking), `axis`, `length`, `diameter`, `stage`,
+`ripeness`, `drupelets` and `plant_id`.
+
+## Requirements
+- Blender ≥ 3.6 (tested with 4.2 LTS). It's only needed to *generate* worlds.
+- ROS 2 Jazzy + Gazebo Harmonic (`ros-jazzy-ros-gz`) to run them.
+
+## Build
+```bash
+cd ~/ros2_ws/src && git clone https://github.com/VicenteQueiroz/raspberry-generator.git
+cd ~/ros2_ws && colcon build --packages-select raspberry_field && source install/setup.bash
+```
+
+## Generate a field
+```bash
+ros2 run raspberry_field generate_field.py --out ~/fields --rows 3 --plants_per_row 6 --seed 1 \
+    -- --detail medium --ripeness 0.7
+# or without ROS: python3 scripts/generate_field.py ... (stdlib only)
+```
+Field options: `--rows`, `--plants_per_row`, `--row_spacing` (2.5 m),
+`--plant_spacing` (0.6 m), `--variants N` (generate N models and reuse them;
+this saves GPU memory), `--jobs`, `--blender PATH` (or `$BLENDER`), and
+`--no_trellis`.
+
+Plant options go after `--`:
+
+| option | default | meaning |
+|---|---|---|
+| `--detail low/medium/high` | medium | drupelet / leaf / tube resolution and texture size |
+| `--ripeness` | 0.7 | season progress: <0 flowers, 0.3 green, 0.7 mixed, 1.0 overripe |
+| `--ripeness_spread` | 0.3 | per-fruit variation |
+| `--height` | 1.7 | floricane height [m] |
+| `--floricanes`, `--primocanes` | random | cane counts |
+| `--fruit_density`, `--leaf_density` | 1.0 | multipliers |
+| `--prickles` | 1.0 | 0 = thornless cultivar |
+| `--fruit_collisions` | off | add a static sphere collision per fruit |
+
+Use a single plant directly:
+`blender -b --factory-startup --python blender/raspberry_gen.py -- --model_dir out/raspberry_0 --seed 42`
+
+**Budget.** A plant has roughly 200–400 fruits. Its triangle count is about
+0.3 M at `low`, 0.5–0.9 M at `medium` and about 2.4 M at `high`. For large
+fields, use `--detail low` and/or `--variants`.
+
+## Run
+```bash
+ros2 launch raspberry_field field.launch.py world_dir:=$HOME/fields/raspberry_field
+```
+This starts `gz sim` with the world dir on `GZ_SIM_RESOURCE_PATH`, a `/clock`
+bridge, and `ground_truth.py`. The ground-truth node publishes a latched
+`visualization_msgs/MarkerArray` on `/raspberry_field/ground_truth` in frame
+`world`, with fruit spheres coloured by stage. Spawn your robot into the world
+as usual.
 
 ## Notes
- - The generated results are reproducible by specifying the seed value
- - Each model has a markers.json listing the position of the fruits relative to the crop
- - Also, the world folder has a markers.json listing all the plant and fruit positions relative to the world origin
+- The meshes are written to glTF with **Z-up data** (`export_yup=False`),
+  which is what Gazebo's Assimp loader expects. If plants show up lying on
+  their side in your Gazebo version, regenerate with `-- --gltf_yup`.
+- Leaves are real two-sided geometry (0.3 mm thick) rather than alpha cards,
+  because Gazebo ignores glTF `doubleSided`.
 
-![random tomato crops in Blender](images/tomatoes.gif)
+## Credits
 
-## Run in a Catkin workspace
-*requires ROS Noetic and Ignition Dome*
+This project is based on
+[**fields-ignition**](https://github.com/azazdeaz/fields-ignition) by András
+Polgár ([@azazdeaz](https://github.com/azazdeaz)), a random tomato field
+generator for ROS 1 Noetic and Ignition Gazebo. The overall idea and pipeline
+come from that project: generate plants with the Blender Python API, assemble
+them into a world, and export per-plant and world-level `markers.json` ground
+truth. This repository replaces the tomato models with a fully procedural
+raspberry generator and moves the stack to ROS 2 Jazzy and Gazebo Harmonic.
 
-### Install
- - `git clone https://github.com/azazdeaz/fields-ignition.git` in the src folder
- - `rosdep install --from-paths src --ignore-src -r -y` in the workspace folder
- -  and build with `catkin_make`
+## License
 
-### Run the simulation
- - run an example world: `roslaunch fields_ignition field.launch world_dir:=$(rospack find fields_ignition)/generated_examples/tomato_field`
- - visualize the ground truth data with rviz: `roslaunch fields_ignition ground_truth.launch world_dir:=$(rospack find fields_ignition)/generated_examples/tomato_field`
-  
-### Generate a new tomato field
- - start the notebook `rosrun fields_ignition tomato_gen_notebook`
- - modify the parameters in the second cell and run the notebook
-
- 
-## Run with Docker
-```bash
-# build the container
-docker build -t ros-tomatoes .
-```
-
-```bash
-# run the simulator with Docker:
-xhost +
-
-docker run -it \
-     -e WORLD_DIR=/catkin_ws/src/fields_ignition/generated_examples/tomato_field \
-     -e DISPLAY \
-     -e QT_X11_NO_MITSHM=1 \
-     -e XAUTHORITY=$XAUTH \
-     -v "$XAUTH:$XAUTH" \
-     -v "/tmp/.X11-unix:/tmp/.X11-unix" \
-     -v "/etc/localtime:/etc/localtime:ro" \
-     -v "/dev/input:/dev/input" \
-     --network host \
-     --rm \
-     --privileged \
-     --runtime=nvidia \
-     --security-opt seccomp=unconfined \
-     --name tomato_field \
-     ros-tomatoes
-```
-> Note: to start a less resource heavy simulation change the `WORLD_DIR` env to `/catkin_ws/src/fields_ignition/generated_examples/tomato_field_mini` 
+MIT. See [LICENSE](LICENSE), which keeps the original fields-ignition copyright notice.
